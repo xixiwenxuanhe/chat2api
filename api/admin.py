@@ -15,6 +15,8 @@ from chatgpt.credentials import (
     session_payload,
     upsert_credential,
 )
+from chatgpt.ChatService import ChatService
+from utils.retry import async_retry
 from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 
 
@@ -163,3 +165,25 @@ async def admin_refresh_models():
     response["model_picker_version"] = catalog.get("model_picker_version")
     response["updated_at"] = updated_at
     return response
+
+
+@app.post("/admin/api/playground/chat", dependencies=[Depends(require_admin)])
+async def admin_playground_chat(request: Request):
+    data = await request.json()
+    model = data.get("model")
+    messages = data.get("messages")
+    if not isinstance(model, str) or not model.strip() or not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=400, detail="model and messages are required")
+    request_data = {"model": model.strip(), "messages": messages, "stream": False}
+
+    async def process():
+        service = ChatService(configs.authorization_list[0])
+        try:
+            await service.set_dynamic_data(request_data)
+            await service.get_chat_requirements()
+            await service.prepare_send_conversation()
+            return await service.send_conversation()
+        finally:
+            await service.close_client()
+
+    return await async_retry(process)

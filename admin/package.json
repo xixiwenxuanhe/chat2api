@@ -12,6 +12,8 @@
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
+    "react-markdown": "latest",
+    "remark-gfm": "latest",
     "react-icons": "latest",
     "vite": "latest"
   },

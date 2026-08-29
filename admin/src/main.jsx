@@ -7,12 +7,15 @@ import {
 } from 'lucide-react'
 import { SiOpenapiinitiative } from 'react-icons/si'
 import { RiBrainAi3Line } from 'react-icons/ri'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import './styles.css'
 
 const views = {
   overview: { label: '概览', description: '网关与账号池运行状态', icon: LayoutDashboard },
   credentials: { label: '凭据', description: '管理 ChatGPT 账号凭据', icon: KeyRound },
   models: { label: '模型', description: '查看官网实时模型目录', icon: Boxes },
+  playground: { label: '游乐场', description: '在网关中直接测试模型', icon: Waypoints },
 }
 
 async function request(path, options = {}) {
@@ -138,6 +141,13 @@ function Models({ models, refresh, loading }) {
   </div>
 }
 
+function Playground({ models, notify }) {
+  const [model, setModel] = useState(models[0]?.id || ''); const [input, setInput] = useState(''); const [messages, setMessages] = useState([]); const [busy, setBusy] = useState(false)
+  useEffect(() => { if (!model && models[0]) setModel(models[0].id) }, [models, model])
+  async function send() { const content=input.trim(); if (!content || busy || !model) return; const next=[...messages,{role:'user',content}]; setMessages(next); setInput(''); setBusy(true); try { const result=await request('/playground/chat',{method:'POST',body:JSON.stringify({model,messages:next})}); const answer=result.choices?.[0]?.message?.content || '未收到模型回复'; setMessages([...next,{role:'assistant',content:answer}]) } catch(e) { notify(e.message,true) } finally { setBusy(false) } }
+  return <div className="view-content playground-content"><div className="view-heading"><div><h2>游乐场</h2><p>使用当前账号池直接测试官网模型</p></div><div className="playground-tools"><label>模型<select value={model} onChange={e=>setModel(e.target.value)}>{models.map(item=><option key={item.id} value={item.id}>{item.name || item.id} · {item.id}</option>)}</select></label><button className="button button-secondary" onClick={()=>setMessages([])} disabled={!messages.length}>清空对话</button></div></div><section className="playground-shell"><div className="playground-messages">{messages.length ? messages.map((message,index)=><div className={`play-message ${message.role}`} key={`${message.role}-${index}`}><span className="play-avatar">{message.role==='user'?'你':'AI'}</span><div><small>{message.role==='user'?'用户':'模型'}</small><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></div></div>) : <div className="play-empty"><span><Waypoints size={22}/></span><h3>开始测试模型</h3><p>选择一个官网模型，输入消息查看真实响应。</p></div>}{busy && <div className="play-message assistant"><span className="play-avatar">AI</span><div><small>模型</small><p className="typing"><i></i><i></i><i></i></p></div></div>}</div><div className="play-input"><textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}} placeholder="输入消息，按 Enter 发送，Shift + Enter 换行" disabled={busy}/><button className="button button-primary" onClick={send} disabled={busy||!input.trim()}>{busy?<LoaderCircle className="spin" size={16}/>:<ChevronRight size={16}/>}发送</button></div></section></div>
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(null); const [view, setView] = useState('overview'); const [sidebar, setSidebar] = useState(false)
   const [status, setStatus] = useState(null); const [credentials, setCredentials] = useState([]); const [models, setModels] = useState([]); const [loading, setLoading] = useState(false); const [toast, setToast] = useState(null)
@@ -151,7 +161,7 @@ function App() {
   async function logout() { await request('/logout', { method: 'POST' }).catch(() => {}); setAuthenticated(false) }
   if (authenticated === null) return <div className="boot"><SiOpenapiinitiative /><LoaderCircle className="spin" /></div>
   if (!authenticated) return <Login onLogin={bootstrap} />
-  return <div className="app-shell"><Sidebar view={view} setView={setView} open={sidebar} close={() => setSidebar(false)} logout={logout} /><main className="workspace"><PageHeader view={view} openMenu={() => setSidebar(true)} />{view === 'overview' && <Overview status={status} modelCount={models.length} refresh={refreshAll} loading={loading} />}{view === 'credentials' && <Credentials credentials={credentials} refresh={loadCredentials} statusRefresh={loadStatus} notify={notify} />}{view === 'models' && <Models models={models} refresh={loadModels} loading={loading} />}</main>{toast && <div className={`toast ${toast.error ? 'toast-error' : ''}`}>{toast.error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{toast.message}</div>}</div>
+  return <div className="app-shell"><Sidebar view={view} setView={setView} open={sidebar} close={() => setSidebar(false)} logout={logout} /><main className="workspace"><PageHeader view={view} openMenu={() => setSidebar(true)} />{view === 'overview' && <Overview status={status} modelCount={models.length} refresh={refreshAll} loading={loading} />}{view === 'credentials' && <Credentials credentials={credentials} refresh={loadCredentials} statusRefresh={loadStatus} notify={notify} />}{view === 'models' && <Models models={models} refresh={loadModels} loading={loading} />}{view === 'playground' && <Playground models={models} notify={notify} />}</main>{toast && <div className={`toast ${toast.error ? 'toast-error' : ''}`}>{toast.error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{toast.message}</div>}</div>
 }
 
 createRoot(document.getElementById('root')).render(<StrictMode><App /></StrictMode>)
