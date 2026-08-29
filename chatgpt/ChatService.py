@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import random
@@ -10,7 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from api.files import get_image_size, get_file_extension, determine_file_use_case
 from chatgpt.authorization import get_req_token, verify_token
 from chatgpt.credentials import get_credential
-from chatgpt.chatFormat import api_messages_to_chat, stream_response, format_not_stream_response, head_process_response
+from chatgpt.chatFormat import api_messages_to_chat, stream_response, f_stream_response, format_not_stream_response, head_process_response
 from chatgpt.chatLimit import check_is_limit, handle_request_limit
 from chatgpt.fp import get_fp
 from chatgpt.proofofWork import get_config, get_dpl, get_answer_token, get_requirements_token
@@ -291,7 +292,18 @@ class ChatService:
             "parent_message_id": self.parent_message_id if self.parent_message_id else f"{uuid.uuid4()}",
             "reset_rate_limits": False,
             "suggestions": [],
-            "supported_encodings": [],
+            "supported_encodings": ["v1"],
+            "enable_message_followups": True,
+            "force_parallel_switch": "auto",
+            "supports_buffering": True,
+            "local_function_names": ["local.continue_in_work"],
+            "model_response_contracts": [
+                {
+                    "id": "photo_upload_action.v1",
+                    "protocol_version": 1,
+                    "presets": ["cap:image", "cap:file", "placement:end"],
+                }
+            ],
             "system_hints": [],
             "timezone": "America/Los_Angeles",
             "timezone_offset_min": -480,
@@ -302,9 +314,121 @@ class ChatService:
             self.chat_request['conversation_id'] = self.conversation_id
         return self.chat_request
 
+    @staticmethod
+    def _normalize_f_event(line):
+        if not line.startswith("data: "):
+            return None
+        try:
+            event = json.loads(line[6:])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(event, dict):
+            return None
+        if isinstance(event.get("v"), dict):
+            normalized = event["v"].copy()
+            if event.get("conversation_id") and not normalized.get("conversation_id"):
+                normalized["conversation_id"] = event["conversation_id"]
+            return normalized
+        return event
+
+    async def _f_conversation_stream(self, response):
+        resume_token = None
+        conversation_id = None
+        visible_assistant_content = False
+        message_state = {}
+        current_message_id = "current"
+
+        def apply_patch(event):
+            nonlocal message_state
+            operations = event.get("v")
+            if event.get("p"):
+                operations = [event]
+            if not isinstance(operations, list) or not operations:
+                return event
+            message_id = event.get("message_id") or current_message_id
+            state = message_state.setdefault(message_id, {"message": {}})
+            message = state["message"]
+            for operation in operations:
+                if not isinstance(operation, dict):
+                    continue
+                path = operation.get("p", "")
+                value = operation.get("v")
+                if path == "/message/content/parts/0":
+                    content = message.setdefault("content", {"content_type": "text", "parts": [""]})
+                    parts = content.setdefault("parts", [""])
+                    if operation.get("o") == "append":
+                        parts[0] = (parts[0] if parts else "") + str(value or "")
+                    elif operation.get("o") == "replace":
+                        parts[0] = str(value or "")
+                elif path == "/message/metadata" and operation.get("o") == "append":
+                    message.setdefault("metadata", {}).update(value if isinstance(value, dict) else {})
+                elif path.startswith("/message/"):
+                    message[path.rsplit("/", 1)[-1]] = value
+            return {"message": message, "conversation_id": event.get("conversation_id") or conversation_id}
+
+        async def forward(source, emit_done):
+            nonlocal resume_token, conversation_id, visible_assistant_content, current_message_id
+            async for raw_line in source.aiter_lines():
+                line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                event = self._normalize_f_event(line)
+                if event is None:
+                    if emit_done and line == "data: [DONE]":
+                        yield b"data: [DONE]\n\n"
+                    continue
+                if event.get("type") == "resume_conversation_token":
+                    resume_token = event.get("token")
+                    conversation_id = event.get("conversation_id") or conversation_id
+                elif event.get("o") == "patch":
+                    event = apply_patch(event)
+                conversation_id = event.get("conversation_id") or conversation_id
+                message = event.get("message") or {}
+                if message.get("id"):
+                    current_message_id = message["id"]
+                    message_state[current_message_id] = {"message": copy.deepcopy(message)}
+                author = message.get("author") or {}
+                content = message.get("content") or {}
+                if author.get("role") == "assistant" and isinstance(content, dict):
+                    parts = content.get("parts") or []
+                    visible_assistant_content = visible_assistant_content or any(bool(part) for part in parts)
+                    visible_assistant_content = visible_assistant_content or bool(content.get("text"))
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        async for event in forward(response, emit_done=False):
+            yield event
+
+        if visible_assistant_content:
+            yield b"data: [DONE]\n\n"
+            return
+        if not resume_token or not conversation_id:
+            return
+
+        resume_headers = self.chat_headers.copy()
+        resume_headers.update(
+            {
+                "accept": "text/event-stream",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+                "x-conduit-token": resume_token,
+                "x-openai-target-path": "/backend-api/f/conversation/resume",
+                "x-openai-target-route": "/backend-api/f/conversation/resume",
+            }
+        )
+        resumed = await self.s.post_stream(
+            f"{self.base_url}/f/conversation/resume",
+            headers=resume_headers,
+            json={"conversation_id": conversation_id, "offset": 0},
+            timeout=90,
+            stream=True,
+        )
+        if resumed.status_code != 200:
+            detail = (await resumed.atext())[:500]
+            raise HTTPException(status_code=resumed.status_code, detail=detail)
+        async for event in forward(resumed, emit_done=True):
+            yield event
+
     async def send_conversation(self):
         try:
-            url = f'{self.base_url}/conversation'
+            url = f'{self.base_url}/f/conversation'
             stream = self.data.get("stream", False)
             r = await self.s.post_stream(url, headers=self.chat_headers, json=self.chat_request, timeout=10, stream=True)
             if r.status_code != 200:
@@ -326,17 +450,12 @@ class ChatService:
 
             content_type = r.headers.get("Content-Type", "")
             if "text/event-stream" in content_type:
-                res, start = await head_process_response(r.aiter_lines())
-                if not start:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Our systems have detected unusual activity coming from your system. Please try again later.",
-                    )
+                res = self._f_conversation_stream(r)
                 if stream:
-                    return stream_response(self, res, self.resp_model, self.max_tokens)
+                    return f_stream_response(res, self.resp_model, self.max_tokens)
                 else:
                     return await format_not_stream_response(
-                        stream_response(self, res, self.resp_model, self.max_tokens),
+                        f_stream_response(res, self.resp_model, self.max_tokens),
                         self.prompt_tokens,
                         self.max_tokens,
                         self.resp_model,

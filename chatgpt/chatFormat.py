@@ -66,6 +66,57 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
     return data
 
 
+async def f_stream_response(response, model, max_tokens):
+    chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
+    created_time = int(time.time())
+    seen = {}
+    ended = False
+    done_emitted = False
+    yield f"data: {json.dumps({'id': chat_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
+    async for raw in response:
+        line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        if line == "data: [DONE]":
+            if not ended:
+                yield "data: [DONE]\n\n"
+                done_emitted = True
+            continue
+        if not line.startswith("data: {") or ended:
+            continue
+        try:
+            event = json.loads(line[6:])
+        except (TypeError, ValueError):
+            continue
+        message = event.get("message") or {}
+        role = (message.get("author") or {}).get("role")
+        if role != "assistant":
+            continue
+        content = message.get("content") or {}
+        content_type = content.get("content_type") if isinstance(content, dict) else None
+        if content_type == "reasoning_recap":
+            continue
+        parts = content.get("parts") if isinstance(content, dict) else None
+        current = parts[0] if isinstance(parts, list) and parts and isinstance(parts[0], str) else ""
+        message_id = message.get("id") or "assistant"
+        previous = seen.get(message_id, "")
+        delta = current[len(previous):] if current.startswith(previous) else current
+        seen[message_id] = current
+        if not delta and not message.get("end_turn"):
+            continue
+        finish_reason = "stop" if message.get("end_turn") and delta else None
+        if finish_reason:
+            ended = True
+        chunk = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created_time,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": finish_reason}],
+        }
+        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    if not done_emitted:
+        yield "data: [DONE]\n\n"
+
+
 async def wss_stream_response(websocket, conversation_id):
     while not websocket.closed:
         try:
@@ -178,7 +229,12 @@ async def stream_response(service, response, model, max_tokens):
                     delta = {"role": "assistant", "content": moderation_message}
                     finish_reason = "stop"
                     end = True
-                elif status == "in_progress":
+                elif status == "in_progress" or (
+                    role == "assistant"
+                    and isinstance(content, dict)
+                    and content.get("content_type") in ("text", "multimodal_text")
+                    and any(content.get("parts", []))
+                ):
                     outer_content_type = content.get("content_type")
                     if outer_content_type == "text":
                         part = content.get("parts", [])[0]
@@ -283,6 +339,9 @@ async def stream_response(service, response, model, max_tokens):
                                     file_id = part.get('asset_pointer').replace('sediment://', '')
                                     image_download_url = await service.get_attachment_url(file_id, conversation_id)
                                     delta = {"content": f"\n![image]({image_download_url})\n"}
+                    elif content.get("content_type") == "reasoning_recap":
+                        recap = content.get("content", "")
+                        delta = {"content": f"\n{recap}\n"} if recap else {}
                     elif message.get("end_turn"):
                         part = content.get("parts", [])[0]
                         new_text = part[len_last_content:]
@@ -307,6 +366,11 @@ async def stream_response(service, response, model, max_tokens):
                             delta = {"content": f"\n{meta_data.get('finished_text')}\n"}
                         else:
                             continue
+                        if role == "tool":
+                            finish_reason = None
+                        else:
+                            finish_reason = "stop"
+                            end = True
                 else:
                     continue
                 last_message_id = message_id

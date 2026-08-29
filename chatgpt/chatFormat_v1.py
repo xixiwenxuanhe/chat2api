@@ -79,7 +79,11 @@ async def head_process_response(response):
                 continue
 
             status = message.get("status")
-            if status == "in_progress":
+            if status == "in_progress" or (
+                role == "assistant"
+                and isinstance(message.get("content"), dict)
+                and any(message["content"].get("parts", []))
+            ):
                 return response, True
     return response, False
 
