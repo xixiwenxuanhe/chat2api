@@ -10,7 +10,7 @@ from starlette.background import BackgroundTask
 from app import app, security_scheme
 from chatgpt.ChatService import ChatService
 from chatgpt.authorization import refresh_all_tokens
-from chatgpt.modelCatalog import fetch_model_catalog, to_openai_model_list
+from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 from utils.Logger import logger
 from utils.configs import api_prefix, scheduled_refresh
 from utils.retry import async_retry
@@ -78,7 +78,7 @@ async def send_conversation(request: Request, credentials: HTTPAuthorizationCred
 
 @app.get(f"/{api_prefix}/v1/models" if api_prefix else "/v1/models")
 async def list_models(credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
-    catalog = await fetch_model_catalog(credentials.credentials)
+    catalog, _ = await get_model_catalog(credentials.credentials)
     return to_openai_model_list(catalog)
 
 

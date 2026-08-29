@@ -5,12 +5,12 @@ import json
 import time
 
 from fastapi import Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import utils.configs as configs
 import utils.globals as globals
-from app import app, templates
-from chatgpt.modelCatalog import fetch_model_catalog, to_openai_model_list
+from app import app
+from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 
 
 COOKIE_NAME = "chat2api_admin"
@@ -93,9 +93,9 @@ def _persist_tokens():
             file.write(token + "\n")
 
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_page(request: Request):
-    return templates.TemplateResponse("admin.html", {"request": request})
+@app.get("/admin")
+async def admin_page():
+    return FileResponse("admin_dist/index.html")
 
 
 @app.post("/admin/api/login")
@@ -180,8 +180,21 @@ async def admin_clear_errors():
 async def admin_models():
     if not configs.authorization_list:
         raise HTTPException(status_code=503, detail="AUTHORIZATION is not configured")
-    catalog = await fetch_model_catalog(configs.authorization_list[0])
+    catalog, updated_at = await get_model_catalog(configs.authorization_list[0])
     response = to_openai_model_list(catalog)
     response["default_model"] = catalog.get("default_model_slug")
     response["model_picker_version"] = catalog.get("model_picker_version")
+    response["updated_at"] = updated_at
+    return response
+
+
+@app.post("/admin/api/models/refresh", dependencies=[Depends(require_admin)])
+async def admin_refresh_models():
+    if not configs.authorization_list:
+        raise HTTPException(status_code=503, detail="AUTHORIZATION is not configured")
+    catalog, updated_at = await get_model_catalog(configs.authorization_list[0], refresh=True)
+    response = to_openai_model_list(catalog)
+    response["default_model"] = catalog.get("default_model_slug")
+    response["model_picker_version"] = catalog.get("model_picker_version")
+    response["updated_at"] = updated_at
     return response

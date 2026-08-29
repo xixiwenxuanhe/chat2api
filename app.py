@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 
 from utils.configs import enable_gateway, api_prefix
 
@@ -33,6 +34,7 @@ app.add_middleware(
 
 templates = Jinja2Templates(directory="templates")
 security_scheme = HTTPBearer()
+app.mount("/admin/assets", StaticFiles(directory="admin_dist/assets", check_dir=False), name="admin-assets")
 
 from app import app
 

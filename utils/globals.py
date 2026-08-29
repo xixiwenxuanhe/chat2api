@@ -12,6 +12,7 @@ WSS_MAP_FILE = os.path.join(DATA_FOLDER, "wss_map.json")
 FP_FILE = os.path.join(DATA_FOLDER, "fp_map.json")
 SEED_MAP_FILE = os.path.join(DATA_FOLDER, "seed_map.json")
 CONVERSATION_MAP_FILE = os.path.join(DATA_FOLDER, "conversation_map.json")
+MODEL_CATALOG_FILE = os.path.join(DATA_FOLDER, "model_catalog.json")
 
 count = 0
 token_list = []
