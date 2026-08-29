@@ -2,33 +2,124 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from api.admin import _credential_record, _extract_tokens
+import utils.globals as globals
+from api.admin import _credential_record
+from chatgpt.credentials import parse_session_json, refresh_credential, upsert_credential
 from chatgpt.modelCatalog import _model_parts, get_model_catalog, to_openai_model_list
 
 
 class CredentialParsingTests(unittest.TestCase):
-    def test_extracts_access_token_from_session_json(self):
-        content = '{"accessToken":"eyJ-session-token","sessionToken":"private"}'
-        self.assertEqual(_extract_tokens(content), ["eyJ-session-token"])
+    def test_parses_complete_session_json(self):
+        content = json.dumps({
+            "accessToken": "eyJ-session-token",
+            "sessionToken": "session-cookie",
+            "account": {"id": "account-1"},
+            "user": {"email": "member@example.com"},
+        })
+        credential = parse_session_json(content)
+        self.assertEqual(credential["access_token"], "eyJ-session-token")
+        self.assertEqual(credential["session_token"], "session-cookie")
+        self.assertEqual(credential["account_id"], "account-1")
+        self.assertEqual(credential["email"], "member@example.com")
 
-    def test_extracts_unique_lines_without_comments(self):
-        content = "# comment\neyJ-first\n\nrefresh-token"
-        self.assertEqual(_extract_tokens(content), ["eyJ-first", "refresh-token"])
-
-    def test_rejects_json_without_access_token(self):
+    def test_rejects_incomplete_session_json(self):
         with self.assertRaises(HTTPException) as context:
-            _extract_tokens('{"sessionToken":"private"}')
+            parse_session_json('{"accessToken":"eyJ-only"}')
         self.assertEqual(context.exception.status_code, 400)
 
-    def test_credential_record_never_exposes_full_token(self):
-        token = "eyJ-this-is-a-sensitive-access-token-value"
-        record = _credential_record(token)
-        self.assertNotIn(token, record.values())
-        self.assertEqual(record["type"], "access_token")
+    def test_credential_record_never_exposes_tokens(self):
+        credential = parse_session_json(json.dumps({
+            "accessToken": "eyJ-sensitive-access",
+            "sessionToken": "sensitive-session",
+            "account": {"id": "account-1"},
+        }))
+        record = _credential_record(credential)
+        self.assertNotIn("eyJ-sensitive-access", record.values())
+        self.assertNotIn("sensitive-session", record.values())
+
+
+class CredentialStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upsert_replaces_same_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            credentials_file = os.path.join(directory, "credentials.json")
+            original = list(globals.credential_list)
+            credential_list = globals.credential_list
+            credential_list.clear()
+            try:
+                with patch("chatgpt.credentials.globals.CREDENTIALS_FILE", credentials_file):
+                    first, created = await upsert_credential(json.dumps({
+                        "accessToken": "eyJ-first",
+                        "sessionToken": "session-first",
+                        "account": {"id": "account-1"},
+                    }))
+                    second, created_again = await upsert_credential(json.dumps({
+                        "accessToken": "eyJ-second",
+                        "sessionToken": "session-second",
+                        "account": {"id": "account-1"},
+                    }))
+                self.assertTrue(created)
+                self.assertFalse(created_again)
+                self.assertEqual(first["id"], second["id"])
+                self.assertEqual(len(credential_list), 1)
+                self.assertEqual(credential_list[0]["access_token"], "eyJ-second")
+                self.assertEqual(os.stat(credentials_file).st_mode & 0o777, 0o600)
+            finally:
+                credential_list[:] = original
+
+    async def test_refresh_updates_access_and_rotated_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            credentials_file = os.path.join(directory, "credentials.json")
+            original = list(globals.credential_list)
+            credential = parse_session_json(json.dumps({
+                "accessToken": "eyJ-stale",
+                "sessionToken": "session-original",
+                "account": {"id": "account-1"},
+            }))
+            globals.credential_list[:] = [credential]
+
+            class Cookies:
+                def __init__(self, values=()):
+                    self.jar = [SimpleNamespace(name=name, value=value) for name, value in values]
+
+            class Response:
+                status_code = 200
+
+                def __init__(self, access_token, cookies=()):
+                    self.cookies = Cookies(cookies)
+                    self._access_token = access_token
+
+                def json(self):
+                    return {
+                        "accessToken": self._access_token,
+                        "account": {"id": "account-1"},
+                        "user": {"email": "member@example.com"},
+                    }
+
+            client = SimpleNamespace(
+                get=AsyncMock(side_effect=[
+                    Response("eyJ-intermediate", [("__Secure-next-auth.session-token", "session-rotated")]),
+                    Response("eyJ-fresh"),
+                ]),
+                close=AsyncMock(),
+                session=SimpleNamespace(cookies=Cookies()),
+            )
+            try:
+                with patch("chatgpt.credentials.globals.CREDENTIALS_FILE", credentials_file), patch(
+                    "chatgpt.credentials.Client", return_value=client
+                ):
+                    refreshed = await refresh_credential(credential["id"])
+                self.assertEqual(refreshed["access_token"], "eyJ-fresh")
+                self.assertEqual(refreshed["session_token"], "session-rotated")
+                self.assertEqual(refreshed["email"], "member@example.com")
+                self.assertEqual(client.get.await_count, 2)
+                self.assertIn("session-rotated", client.get.await_args_list[1].kwargs["headers"]["cookie"])
+            finally:
+                globals.credential_list[:] = original
 
 
 class ModelCatalogTests(unittest.TestCase):

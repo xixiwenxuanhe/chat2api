@@ -5,9 +5,7 @@ import utils.configs as configs
 from utils.Logger import logger
 
 DATA_FOLDER = "data"
-TOKENS_FILE = os.path.join(DATA_FOLDER, "token.txt")
-REFRESH_MAP_FILE = os.path.join(DATA_FOLDER, "refresh_map.json")
-ERROR_TOKENS_FILE = os.path.join(DATA_FOLDER, "error_token.txt")
+CREDENTIALS_FILE = os.path.join(DATA_FOLDER, "credentials.json")
 WSS_MAP_FILE = os.path.join(DATA_FOLDER, "wss_map.json")
 FP_FILE = os.path.join(DATA_FOLDER, "fp_map.json")
 SEED_MAP_FILE = os.path.join(DATA_FOLDER, "seed_map.json")
@@ -15,9 +13,7 @@ CONVERSATION_MAP_FILE = os.path.join(DATA_FOLDER, "conversation_map.json")
 MODEL_CATALOG_FILE = os.path.join(DATA_FOLDER, "model_catalog.json")
 
 count = 0
-token_list = []
-error_token_list = []
-refresh_map = {}
+credential_list = []
 wss_map = {}
 fp_map = {}
 seed_map = {}
@@ -40,14 +36,16 @@ impersonate_list = [
 if not os.path.exists(DATA_FOLDER):
     os.makedirs(DATA_FOLDER)
 
-if os.path.exists(REFRESH_MAP_FILE):
-    with open(REFRESH_MAP_FILE, "r") as f:
+if os.path.exists(CREDENTIALS_FILE):
+    with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
         try:
-            refresh_map = json.load(f)
-        except:
-            refresh_map = {}
-else:
-    refresh_map = {}
+            stored_credentials = json.load(f)
+            if isinstance(stored_credentials, dict):
+                stored_credentials = stored_credentials.get("credentials", [])
+            if isinstance(stored_credentials, list):
+                credential_list = [item for item in stored_credentials if isinstance(item, dict)]
+        except (OSError, ValueError):
+            credential_list = []
 
 if os.path.exists(WSS_MAP_FILE):
     with open(WSS_MAP_FILE, "r") as f:
@@ -85,24 +83,7 @@ if os.path.exists(CONVERSATION_MAP_FILE):
 else:
     conversation_map = {}
 
-if os.path.exists(TOKENS_FILE):
-    with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip() and not line.startswith("#"):
-                token_list.append(line.strip())
-else:
-    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
-        pass
-
-if os.path.exists(ERROR_TOKENS_FILE):
-    with open(ERROR_TOKENS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip() and not line.startswith("#"):
-                error_token_list.append(line.strip())
-else:
-    with open(ERROR_TOKENS_FILE, "w", encoding="utf-8") as f:
-        pass
-
-if token_list:
-    logger.info(f"Token list count: {len(token_list)}, Error token list count: {len(error_token_list)}")
+if credential_list:
+    error_count = sum(item.get("status") == "error" for item in credential_list)
+    logger.info(f"Credential count: {len(credential_list)}, Error credential count: {error_count}")
     logger.info("-" * 60)

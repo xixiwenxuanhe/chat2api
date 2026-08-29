@@ -4,7 +4,7 @@
 
 🌟 无需账号即可使用免费、无限的 `GPT-3.5`
 
-💥 支持 AccessToken 使用账号，支持 `O3-mini/high`、`O1/mini/Pro`、`GPT-4/4o/mini`、`GPTs`
+💥 使用完整 ChatGPT Session JSON 管理账号，AccessToken 过期后自动更新
 
 🔍 回复格式与真实 API 完全一致，适配几乎所有客户端
 
@@ -38,10 +38,10 @@
 > - [x] 支持 Team Plus 账号（需传入 team account id）
 > - [x] 上传图片、文件（格式为 API 对应格式，支持 URL 和 base64）
 > - [x] 可作为网关使用，可多机分布部署
-> - [x] 多账号轮询，同时支持 `AccessToken` 和 `RefreshToken`
-> - [x] 请求失败重试，自动轮询下一个 Token
-> - [x] Tokens 管理，支持上传、清除
-> - [x] 定时使用 `RefreshToken` 刷新 `AccessToken` / 每次启动将会全部非强制刷新一次，每4天晚上3点全部强制刷新一次。
+> - [x] 多账号轮询，使用完整 Session JSON 保存账号上下文
+> - [x] 请求失败重试，自动轮询下一个账号
+> - [x] 凭据管理，支持上传、更新和删除
+> - [x] AccessToken 过期时使用 SessionToken 透明更新并持久化
 > - [x] 支持文件下载，需要开启历史记录
 > - [x] 支持 `O3-mini/high`、`O1/mini/Pro` 等模型推理过程输出
 
@@ -64,7 +64,7 @@
 
 ## 逆向API
 
-完全 `OpenAI` 格式的 API ，支持传入 `AccessToken` 或 `RefreshToken`，可用 GPT-4, GPT-4o, GPT-4o-Mini, GPTs, O1-Pro, O1, O1-Mini, O3-Mini, O3-Mini-High：
+完全兼容 `OpenAI` Chat Completions 格式。客户端使用 `AUTHORIZATION` 中配置的网关密钥调用：
 
 ```bash
 curl --location 'http://127.0.0.1:5005/v1/chat/completions' \
@@ -88,8 +88,7 @@ curl 'http://127.0.0.1:5005/v1/models' \
 
 模型目录会持久化缓存到 `data/model_catalog.json`。缓存不存在时自动获取一次；之后仅在管理面板点击“同步官网”时更新，普通 `/v1/models` 请求不会重复访问官网。
 
-将你账号的 `AccessToken` 或 `RefreshToken` 作为 `{{ Token }}` 传入。
-也可填写你设置的环境变量 `Authorization` 的值, 将会随机选择后台账号
+将环境变量 `AUTHORIZATION` 中配置的网关密钥作为 `{{ Token }}` 传入，服务会从后台账号池选择凭据。
 
 如果有team账号，可以传入 `ChatGPT-Account-ID`，使用 Team 工作区：
 
@@ -99,19 +98,15 @@ curl 'http://127.0.0.1:5005/v1/models' \
 - 传入方式二：
 `Authorization: Bearer <AccessToken 或 RefreshToken>,<ChatGPT-Account-ID>`
 
-如果设置了 `AUTHORIZATION` 环境变量，可以将设置的值作为 `{{ Token }}` 传入进行多 Tokens 轮询。
+在 ChatGPT 官网登录后打开 [https://chatgpt.com/api/auth/session](https://chatgpt.com/api/auth/session)，将返回的完整 JSON 上传到管理面板。单独的 AccessToken、RefreshToken 或 SessionToken 不会被接受。
 
-> - `AccessToken` 获取: chatgpt官网登录后，再打开 [https://chatgpt.com/api/auth/session](https://chatgpt.com/api/auth/session) 获取 `accessToken` 这个值。
-> - `RefreshToken` 获取: 此处不提供获取方法。
-> - 免登录 gpt-3.5 无需传入 Token。
-
-## Tokens 管理
+## 凭据管理
 
 1. 配置环境变量 `AUTHORIZATION` 作为 `授权码` ，然后运行程序。
 
 2. 访问 `/admin`，使用 `ADMIN_KEY` 登录后管理凭据并查看官网实时模型目录。
 
-3. 请求时传入 `AUTHORIZATION` 中配置的 `授权码` 即可使用轮询的Tokens进行对话
+3. 上传完整 Session JSON；请求时传入 `AUTHORIZATION` 中配置的授权码即可使用账号池。
 
 ![tokens.png](docs/tokens.png)
 
@@ -148,8 +143,8 @@ curl 'http://127.0.0.1:5005/v1/models' \
 |      | CONVERSATION_ONLY | `false`                                                     | `false`               | 是否直接使用对话接口，如果你用的网关支持自动解决 `POW` 才启用                           |
 |      | ENABLE_LIMIT      | `true`                                                      | `true`                | 开启后不尝试突破官方次数限制，尽可能防止封号                                       |
 |      | UPLOAD_BY_URL     | `false`                                                     | `false`               | 开启后按照 `URL+空格+正文` 进行对话，自动解析 URL 内容并上传，多个 URL 用空格分隔           |
-|      | SCHEDULED_REFRESH | `false`                                                     | `false`               | 是否定时刷新 `AccessToken` ，开启后每次启动程序将会全部非强制刷新一次，每4天晚上3点全部强制刷新一次。  |
-|      | RANDOM_TOKEN      | `true`                                                      | `true`                | 是否随机选取后台 `Token` ，开启后随机后台账号，关闭后为顺序轮询                         |
+|      | SCHEDULED_REFRESH | `false`                                                     | `false`               | 是否定时检查并更新账号 Session 凭据                                      |
+|      | RANDOM_TOKEN      | `true`                                                      | `true`                | 是否随机选取后台账号，关闭后为顺序轮询                                    |
 | 网关功能 | ENABLE_GATEWAY    | `false`                                                     | `false`               | 是否启用网关模式，开启后可以使用镜像站，但也将会不设防                                  |
 |      | AUTO_SEED          | `false`                                                     | `true`               | 是否启用随机账号模式，默认启用，输入`seed`后随机匹配后台`Token`。关闭之后需要手动对接接口，来进行`Token`管控。    |
 
@@ -215,9 +210,9 @@ docker-compose up -d
 >   - 99%的账号都支持免费 `GPT-4o` ，但根据 IP 地区开启，目前日本和新加坡 IP 已知开启概率较大。
 
 > - 环境变量 `AUTHORIZATION` 是什么？
->   - 是一个自己给 chat2api 设置的一个身份验证，设置后才可使用已保存的 Tokens 轮询，请求时当作 `APIKEY` 传入。
-> - AccessToken 如何获取？
->   - chatgpt官网登录后，再打开 [https://chatgpt.com/api/auth/session](https://chatgpt.com/api/auth/session) 获取 `accessToken` 这个值。
+>   - 是一个自己给 chat2api 设置的网关密钥，请求时当作 `APIKEY` 传入。
+> - 如何获取账号凭据？
+>   - ChatGPT 官网登录后打开 [https://chatgpt.com/api/auth/session](https://chatgpt.com/api/auth/session)，上传页面返回的完整 JSON。
 
 
 ## License

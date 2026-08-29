@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from api.files import get_image_size, get_file_extension, determine_file_use_case
 from chatgpt.authorization import get_req_token, verify_token
+from chatgpt.credentials import get_credential
 from chatgpt.chatFormat import api_messages_to_chat, stream_response, format_not_stream_response, head_process_response
 from chatgpt.chatLimit import check_is_limit, handle_request_limit
 from chatgpt.fp import get_fp
@@ -42,13 +43,9 @@ class ChatService:
 
     async def set_dynamic_data(self, data):
         if self.req_token:
-            req_len = len(self.req_token.split(","))
-            if req_len == 1:
-                self.access_token = await verify_token(self.req_token)
-                self.account_id = None
-            else:
-                self.access_token = await verify_token(self.req_token.split(",")[0])
-                self.account_id = self.req_token.split(",")[1]
+            credential = get_credential(self.req_token)
+            self.access_token = await verify_token(self.req_token)
+            self.account_id = credential.get("account_id") if credential else None
         else:
             logger.info("Request token is empty, use no-auth 3.5")
             self.access_token = None

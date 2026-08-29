@@ -10,6 +10,7 @@ from starlette.background import BackgroundTask
 from app import app, security_scheme
 from chatgpt.ChatService import ChatService
 from chatgpt.authorization import refresh_all_tokens
+from chatgpt.credentials import is_expired_error, refresh_credential
 from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 from utils.Logger import logger
 from utils.configs import api_prefix, scheduled_refresh
@@ -34,7 +35,11 @@ async def to_send_conversation(request_data, req_token):
         await chat_service.get_chat_requirements()
         return chat_service
     except HTTPException as e:
-        await chat_service.close_client()
+        try:
+            if is_expired_error(e):
+                await refresh_credential(chat_service.req_token)
+        finally:
+            await chat_service.close_client()
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
         await chat_service.close_client()
@@ -44,9 +49,17 @@ async def to_send_conversation(request_data, req_token):
 
 async def process(request_data, req_token):
     chat_service = await to_send_conversation(request_data, req_token)
-    await chat_service.prepare_send_conversation()
-    res = await chat_service.send_conversation()
-    return chat_service, res
+    try:
+        await chat_service.prepare_send_conversation()
+        res = await chat_service.send_conversation()
+        return chat_service, res
+    except HTTPException as error:
+        try:
+            if is_expired_error(error):
+                await refresh_credential(chat_service.req_token)
+        finally:
+            await chat_service.close_client()
+        raise
 
 
 @app.post(f"/{api_prefix}/v1/chat/completions" if api_prefix else "/v1/chat/completions")

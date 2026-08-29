@@ -1,7 +1,5 @@
-import asyncio
 import hashlib
 import hmac
-import json
 import time
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -10,11 +8,17 @@ from fastapi.responses import FileResponse, JSONResponse
 import utils.configs as configs
 import utils.globals as globals
 from app import app
+from chatgpt.credentials import (
+    clear_credential_errors,
+    delete_credential,
+    refresh_credential,
+    session_payload,
+    upsert_credential,
+)
 from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 
 
 COOKIE_NAME = "chat2api_admin"
-token_lock = asyncio.Lock()
 
 
 def _admin_secret():
@@ -36,61 +40,16 @@ async def require_admin(request: Request):
         raise HTTPException(status_code=401, detail="Invalid management key")
 
 
-def _token_id(token):
-    return hashlib.sha256(token.encode()).hexdigest()[:16]
-
-
-def _token_type(token):
-    if token.startswith("eyJ"):
-        return "access_token"
-    if len(token) == 45:
-        return "refresh_token"
-    return "token"
-
-
-def _masked_token(token):
-    if len(token) <= 18:
-        return token[:4] + "..." + token[-3:]
-    return token[:10] + "..." + token[-8:]
-
-
-def _credential_record(token):
+def _credential_record(credential):
     return {
-        "id": _token_id(token),
-        "type": _token_type(token),
-        "masked": _masked_token(token),
-        "status": "error" if token in globals.error_token_list else "active",
+        "id": credential["id"],
+        "account_id": credential.get("account_id"),
+        "email": credential.get("email"),
+        "status": credential.get("status", "active"),
+        "access_expires_at": credential.get("access_expires_at"),
+        "updated_at": credential.get("updated_at"),
+        "last_error": credential.get("last_error"),
     }
-
-
-def _extract_tokens(content):
-    content = content.strip()
-    if not content:
-        return []
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        payload = None
-    if isinstance(payload, dict):
-        token = payload.get("accessToken") or payload.get("access_token")
-        if isinstance(token, str) and token.strip():
-            return [token.strip()]
-        nested = payload.get("tokens")
-        if isinstance(nested, dict):
-            token = nested.get("access_token") or nested.get("accessToken")
-            if isinstance(token, str) and token.strip():
-                return [token.strip()]
-        raise HTTPException(status_code=400, detail="No access token found in JSON")
-    return [line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-
-
-def _persist_tokens():
-    with open(globals.TOKENS_FILE, "w", encoding="utf-8") as file:
-        for token in globals.token_list:
-            file.write(token + "\n")
-    with open(globals.ERROR_TOKENS_FILE, "w", encoding="utf-8") as file:
-        for token in globals.error_token_list:
-            file.write(token + "\n")
 
 
 @app.get("/admin")
@@ -127,12 +86,12 @@ async def admin_logout(response: Response):
 
 @app.get("/admin/api/status", dependencies=[Depends(require_admin)])
 async def admin_status():
-    active = len(set(globals.token_list) - set(globals.error_token_list))
+    active = sum(item.get("status") != "error" for item in globals.credential_list)
     return {
         "service": "online",
-        "credentials": len(set(globals.token_list)),
+        "credentials": len(globals.credential_list),
         "active_credentials": active,
-        "error_credentials": len(set(globals.error_token_list)),
+        "error_credentials": len(globals.credential_list) - active,
         "gateway_enabled": configs.enable_gateway,
         "proxy_configured": bool(configs.proxy_url_list),
         "timestamp": int(time.time()),
@@ -141,38 +100,44 @@ async def admin_status():
 
 @app.get("/admin/api/credentials", dependencies=[Depends(require_admin)])
 async def admin_credentials():
-    return {"data": [_credential_record(token) for token in dict.fromkeys(globals.token_list)]}
+    return {"data": [_credential_record(credential) for credential in globals.credential_list]}
+
+
+@app.get("/admin/api/credentials/{credential_id}", dependencies=[Depends(require_admin)])
+async def admin_credential_detail(credential_id: str):
+    credential = next((item for item in globals.credential_list if item.get("id") == credential_id), None)
+    if not credential:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return {"id": credential_id, "session": session_payload(credential)}
 
 
 @app.post("/admin/api/credentials", dependencies=[Depends(require_admin)])
 async def admin_add_credentials(request: Request):
     data = await request.json()
-    tokens = _extract_tokens(str(data.get("content", "")))
-    async with token_lock:
-        existing = set(globals.token_list)
-        added = [token for token in tokens if token not in existing]
-        globals.token_list.extend(added)
-        _persist_tokens()
-    return {"status": "ok", "added": len(added), "total": len(set(globals.token_list))}
+    credential, created = await upsert_credential(data.get("content", ""))
+    return {
+        "status": "ok",
+        "created": created,
+        "credential": _credential_record(credential),
+        "total": len(globals.credential_list),
+    }
 
 
 @app.delete("/admin/api/credentials/{credential_id}", dependencies=[Depends(require_admin)])
 async def admin_delete_credential(credential_id: str):
-    async with token_lock:
-        matches = [token for token in globals.token_list if _token_id(token) == credential_id]
-        if not matches:
-            raise HTTPException(status_code=404, detail="Credential not found")
-        globals.token_list[:] = [token for token in globals.token_list if token not in matches]
-        globals.error_token_list[:] = [token for token in globals.error_token_list if token not in matches]
-        _persist_tokens()
+    await delete_credential(credential_id)
     return {"status": "ok"}
+
+
+@app.post("/admin/api/credentials/{credential_id}/refresh", dependencies=[Depends(require_admin)])
+async def admin_refresh_credential(credential_id: str):
+    credential = await refresh_credential(credential_id)
+    return {"status": "ok", "credential": _credential_record(credential)}
 
 
 @app.delete("/admin/api/errors", dependencies=[Depends(require_admin)])
 async def admin_clear_errors():
-    async with token_lock:
-        globals.error_token_list.clear()
-        _persist_tokens()
+    await clear_credential_errors()
     return {"status": "ok"}
 
 

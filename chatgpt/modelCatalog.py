@@ -7,6 +7,7 @@ import time
 from fastapi import HTTPException
 
 from chatgpt.ChatService import ChatService
+from chatgpt.credentials import is_expired_error, refresh_credential
 import utils.globals as globals
 from utils.configs import history_disabled
 
@@ -34,24 +35,29 @@ async def get_model_catalog(req_token, refresh=False):
 
 
 async def _fetch_model_catalog(req_token):
-    service = ChatService(req_token)
-    try:
-        await service.set_dynamic_data({"model": "auto", "messages": []})
-        response = await service.s.get(
-            f"{service.base_url}/models",
-            headers=service.base_headers,
-            params={"history_and_training_disabled": str(history_disabled).lower()},
-            timeout=15,
-        )
-        if response.status_code != 200:
+    for attempt in range(2):
+        service = ChatService(req_token)
+        try:
+            await service.set_dynamic_data({"model": "auto", "messages": []})
+            response = await service.s.get(
+                f"{service.base_url}/models",
+                headers=service.base_headers,
+                params={"history_and_training_disabled": str(history_disabled).lower()},
+                timeout=15,
+            )
+            if response.status_code == 200:
+                return response.json()
             try:
                 detail = response.json().get("detail", response.json())
             except Exception:
                 detail = response.text[:500]
-            raise HTTPException(status_code=response.status_code, detail=detail)
-        return response.json()
-    finally:
-        await service.close_client()
+            error = HTTPException(status_code=response.status_code, detail=detail)
+            if attempt == 0 and is_expired_error(error):
+                await refresh_credential(service.req_token)
+                continue
+            raise error
+        finally:
+            await service.close_client()
 
 
 def to_openai_model_list(catalog):
