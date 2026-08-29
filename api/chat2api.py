@@ -2,15 +2,15 @@ import asyncio
 import types
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Request, HTTPException, Form, Security
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi import Request, HTTPException, Security
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.background import BackgroundTask
 
-import utils.globals as globals
-from app import app, templates, security_scheme
+from app import app, security_scheme
 from chatgpt.ChatService import ChatService
 from chatgpt.authorization import refresh_all_tokens
+from chatgpt.modelCatalog import fetch_model_catalog, to_openai_model_list
 from utils.Logger import logger
 from utils.configs import api_prefix, scheduled_refresh
 from utils.retry import async_retry
@@ -76,61 +76,12 @@ async def send_conversation(request: Request, credentials: HTTPAuthorizationCred
         raise HTTPException(status_code=500, detail="Server error")
 
 
-@app.get(f"/{api_prefix}/tokens" if api_prefix else "/tokens", response_class=HTMLResponse)
-async def upload_html(request: Request):
-    tokens_count = len(set(globals.token_list) - set(globals.error_token_list))
-    return templates.TemplateResponse("tokens.html",
-                                      {"request": request, "api_prefix": api_prefix, "tokens_count": tokens_count})
+@app.get(f"/{api_prefix}/v1/models" if api_prefix else "/v1/models")
+async def list_models(credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    catalog = await fetch_model_catalog(credentials.credentials)
+    return to_openai_model_list(catalog)
 
 
-@app.post(f"/{api_prefix}/tokens/upload" if api_prefix else "/tokens/upload")
-async def upload_post(text: str = Form(...)):
-    lines = text.split("\n")
-    for line in lines:
-        if line.strip() and not line.startswith("#"):
-            globals.token_list.append(line.strip())
-            with open(globals.TOKENS_FILE, "a", encoding="utf-8") as f:
-                f.write(line.strip() + "\n")
-    logger.info(f"Token count: {len(globals.token_list)}, Error token count: {len(globals.error_token_list)}")
-    tokens_count = len(set(globals.token_list) - set(globals.error_token_list))
-    return {"status": "success", "tokens_count": tokens_count}
-
-
-@app.post(f"/{api_prefix}/tokens/clear" if api_prefix else "/tokens/clear")
-async def clear_tokens():
-    globals.token_list.clear()
-    globals.error_token_list.clear()
-    with open(globals.TOKENS_FILE, "w", encoding="utf-8") as f:
-        pass
-    logger.info(f"Token count: {len(globals.token_list)}, Error token count: {len(globals.error_token_list)}")
-    tokens_count = len(set(globals.token_list) - set(globals.error_token_list))
-    return {"status": "success", "tokens_count": tokens_count}
-
-
-@app.post(f"/{api_prefix}/tokens/error" if api_prefix else "/tokens/error")
-async def error_tokens():
-    error_tokens_list = list(set(globals.error_token_list))
-    return {"status": "success", "error_tokens": error_tokens_list}
-
-
-@app.get(f"/{api_prefix}/tokens/add/{{token}}" if api_prefix else "/tokens/add/{token}")
-async def add_token(token: str):
-    if token.strip() and not token.startswith("#"):
-        globals.token_list.append(token.strip())
-        with open(globals.TOKENS_FILE, "a", encoding="utf-8") as f:
-            f.write(token.strip() + "\n")
-    logger.info(f"Token count: {len(globals.token_list)}, Error token count: {len(globals.error_token_list)}")
-    tokens_count = len(set(globals.token_list) - set(globals.error_token_list))
-    return {"status": "success", "tokens_count": tokens_count}
-
-
-@app.post(f"/{api_prefix}/seed_tokens/clear" if api_prefix else "/seed_tokens/clear")
-async def clear_seed_tokens():
-    globals.seed_map.clear()
-    globals.conversation_map.clear()
-    with open(globals.SEED_MAP_FILE, "w", encoding="utf-8") as f:
-        f.write("{}")
-    with open(globals.CONVERSATION_MAP_FILE, "w", encoding="utf-8") as f:
-        f.write("{}")
-    logger.info(f"Seed token count: {len(globals.seed_map)}")
-    return {"status": "success", "seed_tokens_count": len(globals.seed_map)}
+@app.get(f"/{api_prefix}/tokens" if api_prefix else "/tokens")
+async def legacy_tokens_page():
+    return RedirectResponse("/admin", status_code=307)

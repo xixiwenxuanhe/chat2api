@@ -1,22 +1,17 @@
-version: '3'
-
 services:
   chat2api:
-    image: lanqian528/chat2api:latest
+    build: .
+    image: chat2api:local
     container_name: chat2api
     restart: unless-stopped
     ports:
-      - '5005:5005'
+      - "5005:5005"
     volumes:
       - ./data:/app/data
     environment:
-      - TZ=Asia/Shanghai
-      - AUTHORIZATION=sk-xxx
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: --cleanup --interval 300 chat2api
+      TZ: Asia/Shanghai
+      # Only expose the OpenAI-compatible API; do not load the ChatGPT web mirror.
+      ENABLE_GATEWAY: "false"
+      AUTHORIZATION: ${AUTHORIZATION}
+      ADMIN_KEY: ${ADMIN_KEY}
+      PROXY_URL: ${PROXY_URL}

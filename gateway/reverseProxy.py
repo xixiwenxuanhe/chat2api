@@ -269,8 +269,9 @@ async def chatgpt_reverse_proxy(request: Request, path: str):
                                 .replace("cdn.oaistatic.com", origin_host)
                                 .replace("https", petrol)}, background=background)
             elif 'stream' in r.headers.get("content-type", ""):
-                logger.info(f"Request token: {req_token}")
-                logger.info(f"Request proxy: {proxy_url}")
+                token_id = hashlib.sha256(req_token.encode()).hexdigest()[:12] if req_token else "anonymous"
+                logger.info(f"Credential: {token_id}")
+                logger.info(f"Request proxy: {'configured' if proxy_url else 'None'}")
                 logger.info(f"Request UA: {user_agent}")
                 logger.info(f"Request impersonate: {impersonate}")
                 conv_key = r.cookies.get("conv_key", "")

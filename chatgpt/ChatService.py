@@ -8,7 +8,6 @@ from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from api.files import get_image_size, get_file_extension, determine_file_use_case
-from api.models import model_proxy
 from chatgpt.authorization import get_req_token, verify_token
 from chatgpt.chatFormat import api_messages_to_chat, stream_response, format_not_stream_response, head_process_response
 from chatgpt.chatLimit import check_is_limit, handle_request_limit
@@ -59,8 +58,9 @@ class ChatService:
         self.proxy_url = self.fp.pop("proxy_url", None)
         self.impersonate = self.fp.pop("impersonate", "safari15_3")
         self.user_agent = self.fp.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0")
-        logger.info(f"Request token: {self.req_token}")
-        logger.info(f"Request proxy: {self.proxy_url}")
+        token_id = hashlib.sha256(self.req_token.encode()).hexdigest()[:12] if self.req_token else "anonymous"
+        logger.info(f"Credential: {token_id}")
+        logger.info(f"Request proxy: {'configured' if self.proxy_url else 'None'}")
         logger.info(f"Request UA: {self.user_agent}")
         logger.info(f"Request impersonate: {self.impersonate}")
 
@@ -133,49 +133,22 @@ class ChatService:
         await get_dpl(self)
 
     async def set_model(self):
-        self.origin_model = self.data.get("model", "gpt-3.5-turbo-0125")
-        self.resp_model = model_proxy.get(self.origin_model, self.origin_model)
+        self.origin_model = self.data.get("model")
+        if not isinstance(self.origin_model, str) or not self.origin_model.strip():
+            raise HTTPException(status_code=400, detail={
+                "message": "The model field is required.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_required",
+            })
+        self.origin_model = self.origin_model.strip()
+        self.resp_model = self.origin_model
         if "gizmo" in self.origin_model or "g-" in self.origin_model:
             self.gizmo_id = "g-" + self.origin_model.split("g-")[-1]
         else:
             self.gizmo_id = None
 
-        if "o3-mini-high" in self.origin_model:
-            self.req_model = "o3-mini-high"
-        elif "o3-mini-medium" in self.origin_model:
-            self.req_model = "o3-mini-medium"
-        elif "o3-mini-low" in self.origin_model:
-            self.req_model = "o3-mini-low"
-        elif "o3-mini" in self.origin_model:
-            self.req_model = "o3-mini"
-        elif "o3" in self.origin_model:
-            self.req_model = "o3"
-        elif "o1-preview" in self.origin_model:
-            self.req_model = "o1-preview"
-        elif "o1-pro" in self.origin_model:
-            self.req_model = "o1-pro"
-        elif "o1-mini" in self.origin_model:
-            self.req_model = "o1-mini"
-        elif "o1" in self.origin_model:
-            self.req_model = "o1"
-        elif "gpt-4.5o" in self.origin_model:
-            self.req_model = "gpt-4.5o"
-        elif "gpt-4o-canmore" in self.origin_model:
-            self.req_model = "gpt-4o-canmore"
-        elif "gpt-4o-mini" in self.origin_model:
-            self.req_model = "gpt-4o-mini"
-        elif "gpt-4o" in self.origin_model:
-            self.req_model = "gpt-4o"
-        elif "gpt-4-mobile" in self.origin_model:
-            self.req_model = "gpt-4-mobile"
-        elif "gpt-4" in self.origin_model:
-            self.req_model = "gpt-4"
-        elif "gpt-3.5" in self.origin_model:
-            self.req_model = "text-davinci-002-render-sha"
-        elif "auto" in self.origin_model:
-            self.req_model = "auto"
-        else:
-            self.req_model = "gpt-4o"
+        self.req_model = self.origin_model
 
     async def get_chat_requirements(self):
         if conversation_only:
@@ -191,19 +164,6 @@ class ChatService:
                 resp = r.json()
 
                 self.persona = resp.get("persona")
-                if self.persona != "chatgpt-paid":
-                    if self.req_model == "gpt-4" or self.req_model == "o1-preview":
-                        logger.error(f"Model {self.resp_model} not support for {self.persona}")
-                        raise HTTPException(
-                            status_code=404,
-                            detail={
-                                "message": f"The model `{self.origin_model}` does not exist or you do not have access to it.",
-                                "type": "invalid_request_error",
-                                "param": None,
-                                "code": "model_not_found",
-                            },
-                        )
-
                 turnstile = resp.get('turnstile', {})
                 turnstile_required = turnstile.get('required')
                 if turnstile_required:
@@ -308,7 +268,7 @@ class ChatService:
         else:
             conversation_mode = {"kind": "primary_assistant"}
 
-        logger.info(f"Model mapping: {self.origin_model} -> {self.req_model}")
+        logger.info(f"Request Model: {self.req_model}")
         self.chat_request = {
             "action": "next",
             "client_contextual_info": {

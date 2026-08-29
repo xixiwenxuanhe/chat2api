@@ -77,6 +77,15 @@ curl --location 'http://127.0.0.1:5005/v1/chat/completions' \
    }'
 ```
 
+模型列表会根据当前账号权限从 ChatGPT 官网实时获取：
+
+```bash
+curl 'http://127.0.0.1:5005/v1/models' \
+  --header 'Authorization: Bearer {{Token}}'
+```
+
+调用时直接使用模型列表返回的官网 `id`，例如 `gpt-5-6`。模型标识会原样传递给官网，不进行别名转换或静默回退。
+
 将你账号的 `AccessToken` 或 `RefreshToken` 作为 `{{ Token }}` 传入。
 也可填写你设置的环境变量 `Authorization` 的值, 将会随机选择后台账号
 
@@ -98,7 +107,7 @@ curl --location 'http://127.0.0.1:5005/v1/chat/completions' \
 
 1. 配置环境变量 `AUTHORIZATION` 作为 `授权码` ，然后运行程序。
 
-2. 访问 `/tokens` 或者 `/{api_prefix}/tokens` 可以查看现有 Tokens 数量，也可以上传新的 Tokens ，或者清空 Tokens。
+2. 访问 `/admin`，使用 `ADMIN_KEY` 登录后管理凭据并查看官网实时模型目录。
 
 3. 请求时传入 `AUTHORIZATION` 中配置的 `授权码` 即可使用轮询的Tokens进行对话
 
@@ -126,6 +135,7 @@ curl --location 'http://127.0.0.1:5005/v1/chat/completions' \
 |------|-------------------|-------------------------------------------------------------|-----------------------|--------------------------------------------------------------|
 | 安全相关 | API_PREFIX        | `your_prefix`                                               | `None`                | API 前缀密码，不设置容易被人访问，设置后需请求 `/your_prefix/v1/chat/completions` |
 |      | AUTHORIZATION     | `your_first_authorization`,<br/>`your_second_authorization` | `[]`                  | 你自己为使用多账号轮询 Tokens 设置的授权码，英文逗号分隔                             |
+|      | ADMIN_KEY        | `your_admin_key`                                           | `None`                | 管理面板 `/admin` 的独立登录密钥；未设置时回退使用第一个 `AUTHORIZATION`                |
 |      | AUTH_KEY          | `your_auth_key`                                             | `None`                | 私人网关需要加`auth_key`请求头才设置该项                                    |
 | 请求相关 | CHATGPT_BASE_URL  | `https://chatgpt.com`                                       | `https://chatgpt.com` | ChatGPT 网关地址，设置后会改变请求的网站，多个网关用逗号分隔                           |
 |      | PROXY_URL         | `http://ip:port`,<br/>`http://username:password@ip:port`    | `[]`                  | 全局代理 URL，出 403 时启用，多个代理用逗号分隔                                 |
@@ -211,4 +221,3 @@ docker-compose up -d
 ## License
 
 MIT License
-

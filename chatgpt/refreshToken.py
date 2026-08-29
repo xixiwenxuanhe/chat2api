@@ -22,7 +22,7 @@ async def rt2ac(refresh_token, force_refresh=False):
             globals.refresh_map[refresh_token] = {"token": access_token, "timestamp": int(time.time())}
             with open(globals.REFRESH_MAP_FILE, "w") as f:
                 json.dump(globals.refresh_map, f, indent=4)
-            logger.info(f"refresh_token -> access_token with openai: {access_token}")
+            logger.info("Refresh token exchanged successfully")
             return access_token
         except HTTPException as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail)
@@ -53,7 +53,8 @@ async def chat_refresh(refresh_token):
             else:
                 raise Exception(r.text[:300])
     except Exception as e:
-        logger.error(f"Failed to refresh access_token `{refresh_token}`: {str(e)}")
+        token_id = hashlib.sha256(refresh_token.encode()).hexdigest()[:12]
+        logger.error(f"Failed to refresh credential {token_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh access_token.")
     finally:
         await client.close()

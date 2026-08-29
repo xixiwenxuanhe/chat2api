@@ -11,7 +11,6 @@ import websockets
 from fastapi import HTTPException
 
 from api.files import get_file_content
-from api.models import model_system_fingerprint
 from api.tokens import split_tokens_from_content, calculate_image_tokens, num_tokens_from_messages
 from utils.Logger import logger
 
@@ -20,8 +19,6 @@ moderation_message = "I'm sorry, I cannot provide or engage in any content relat
 
 async def format_not_stream_response(response, prompt_tokens, max_tokens, model):
     chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
-    system_fingerprint_list = model_system_fingerprint.get(model, None)
-    system_fingerprint = random.choice(system_fingerprint_list) if system_fingerprint_list else None
     created_time = int(time.time())
     all_text = ""
     async for chunk in response:
@@ -66,8 +63,6 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
         ],
         "usage": usage
     }
-    if system_fingerprint:
-        data["system_fingerprint"] = system_fingerprint
     return data
 
 

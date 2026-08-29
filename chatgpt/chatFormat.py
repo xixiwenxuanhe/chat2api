@@ -11,7 +11,6 @@ import websockets
 from fastapi import HTTPException
 
 from api.files import get_file_content
-from api.models import model_system_fingerprint
 from api.tokens import split_tokens_from_content, calculate_image_tokens, num_tokens_from_messages
 from utils.Logger import logger
 
@@ -20,8 +19,6 @@ moderation_message = "I'm sorry, I cannot provide or engage in any content relat
 
 async def format_not_stream_response(response, prompt_tokens, max_tokens, model):
     chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
-    system_fingerprint_list = model_system_fingerprint.get(model, None)
-    system_fingerprint = random.choice(system_fingerprint_list) if system_fingerprint_list else None
     created_time = int(time.time())
     all_text = ""
     async for chunk in response:
@@ -66,8 +63,6 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
         ],
         "usage": usage
     }
-    if system_fingerprint:
-        data["system_fingerprint"] = system_fingerprint
     return data
 
 
@@ -128,8 +123,6 @@ async def head_process_response(response):
 
 async def stream_response(service, response, model, max_tokens):
     chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
-    system_fingerprint_list = model_system_fingerprint.get(model, None)
-    system_fingerprint = random.choice(system_fingerprint_list) if system_fingerprint_list else None
     created_time = int(time.time())
     completion_tokens = 0
     len_last_content = 0
@@ -155,8 +148,6 @@ async def stream_response(service, response, model, max_tokens):
             }
         ]
     }
-    if system_fingerprint:
-        chunk_new_data["system_fingerprint"] = system_fingerprint
     yield f"data: {json.dumps(chunk_new_data)}\n\n"
 
     async for chunk in response:
