@@ -52,11 +52,11 @@ async def num_tokens_from_messages(messages, model=''):
         for key, value in message.items():
             if isinstance(value, list):
                 for item in value:
-                    if item.get("type") == "text":
+                    if isinstance(item, dict) and item.get("type") == "text":
                         num_tokens += len(encoding.encode(item.get("text")))
-                    if item.get("type") == "image_url":
+                    if isinstance(item, dict) and item.get("type") == "image_url":
                         pass
-            else:
+            elif isinstance(value, str):
                 num_tokens += len(encoding.encode(value))
     num_tokens += 3
     return num_tokens

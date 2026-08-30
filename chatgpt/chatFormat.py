@@ -569,6 +569,11 @@ async def api_messages_to_chat(service, api_messages, upload_by_url=False):
     for api_message in api_messages:
         role = api_message.get('role')
         content = api_message.get('content')
+        # skip empty / incomplete messages (e.g. an interrupted streaming
+        # placeholder that got persisted) - they carry no content and can
+        # make the upstream reject the request.
+        if not content or (isinstance(content, str) and not content.strip()):
+            continue
         if upload_by_url:
             if isinstance(content, str):
                 content = format_messages_with_url(content)
