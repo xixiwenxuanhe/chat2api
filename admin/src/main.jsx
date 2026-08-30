@@ -1,14 +1,17 @@
-import { StrictMode, useEffect, useMemo, useState } from 'react'
+import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Activity, AlertTriangle, Boxes, CheckCircle2, ChevronRight, Database,
+  Activity, AlertTriangle, Boxes, BrainIcon, CheckCircle2, ChevronDown, ChevronRight, Database,
   Eye, EyeOff, KeyRound, LayoutDashboard, LoaderCircle, LogOut, Menu,
-  Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, Waypoints, X,
+  Paperclip, Plus, RefreshCw, Search, Server, ShieldCheck, SlidersHorizontal, Trash2, Waypoints, X,
 } from 'lucide-react'
 import { SiOpenapiinitiative } from 'react-icons/si'
 import { RiBrainAi3Line } from 'react-icons/ri'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import './styles.css'
 
 const views = {
@@ -92,11 +95,6 @@ function Sidebar({ view, setView, open, close, logout }) {
   </>
 }
 
-function PageHeader({ view, openMenu }) {
-  const item = views[view]
-  return <header className="topbar"><div className="topbar-title"><button className="icon-button mobile-menu" onClick={openMenu} title="打开导航"><Menu size={20} /></button><div><h1>{item.label}</h1><p>{item.description}</p></div></div><div className="topbar-state"><span className="pulse" />运行中</div></header>
-}
-
 function Stat({ icon: Icon, label, value, tone }) {
   return <div className="stat"><span className={`stat-icon ${tone || ''}`}><Icon size={19} /></span><div><span>{label}</span><strong>{value ?? '—'}</strong></div></div>
 }
@@ -142,10 +140,82 @@ function Models({ models, refresh, loading }) {
 }
 
 function Playground({ models, notify }) {
-  const [model, setModel] = useState(models[0]?.id || ''); const [input, setInput] = useState(''); const [messages, setMessages] = useState([]); const [busy, setBusy] = useState(false)
+  const [model, setModel] = useState(models[0]?.id || ''); const [input, setInput] = useState(''); const [messages, setMessages] = useState([]); const [busy, setBusy] = useState(false); const [showSettings, setShowSettings] = useState(false); const [modelOpen, setModelOpen] = useState(false)
+  const [params, setParams] = useState({ stream: true, temperature: 1, topP: 1, frequencyPenalty: 0, presencePenalty: 0, maxTokens: 4096 })
+  const [maxTokensEnabled, setMaxTokensEnabled] = useState(true)
+  const composerRef = useRef(null)
   useEffect(() => { if (!model && models[0]) setModel(models[0].id) }, [models, model])
-  async function send() { const content=input.trim(); if (!content || busy || !model) return; const next=[...messages,{role:'user',content}]; setMessages(next); setInput(''); setBusy(true); try { const result=await request('/playground/chat',{method:'POST',body:JSON.stringify({model,messages:next})}); const answer=result.choices?.[0]?.message?.content || '未收到模型回复'; setMessages([...next,{role:'assistant',content:answer}]) } catch(e) { notify(e.message,true) } finally { setBusy(false) } }
-  return <div className="view-content playground-content"><div className="view-heading"><div><h2>游乐场</h2><p>使用当前账号池直接测试官网模型</p></div><div className="playground-tools"><label>模型<select value={model} onChange={e=>setModel(e.target.value)}>{models.map(item=><option key={item.id} value={item.id}>{item.name || item.id} · {item.id}</option>)}</select></label><button className="button button-secondary" onClick={()=>setMessages([])} disabled={!messages.length}>清空对话</button></div></div><section className="playground-shell"><div className="playground-messages">{messages.length ? messages.map((message,index)=><div className={`play-message ${message.role}`} key={`${message.role}-${index}`}><span className="play-avatar">{message.role==='user'?'你':'AI'}</span><div><small>{message.role==='user'?'用户':'模型'}</small><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></div></div>) : <div className="play-empty"><span><Waypoints size={22}/></span><h3>开始测试模型</h3><p>选择一个官网模型，输入消息查看真实响应。</p></div>}{busy && <div className="play-message assistant"><span className="play-avatar">AI</span><div><small>模型</small><p className="typing"><i></i><i></i><i></i></p></div></div>}</div><div className="play-input"><textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}} placeholder="输入消息，按 Enter 发送，Shift + Enter 换行" disabled={busy}/><button className="button button-primary" onClick={send} disabled={busy||!input.trim()}>{busy?<LoaderCircle className="spin" size={16}/>:<ChevronRight size={16}/>}发送</button></div></section></div>
+  useEffect(() => {
+    if (!showSettings && !modelOpen) return
+    const onDocClick = e => { if (composerRef.current && !composerRef.current.contains(e.target)) { setShowSettings(false); setModelOpen(false) } }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [showSettings, modelOpen])
+  const updateParam = (key, value) => setParams(prev => ({ ...prev, [key]: value }))
+
+  async function send() {
+    const content = input.trim(); if (!content || busy || !model) return
+    const history = [...messages, { role: 'user', content }]
+    setMessages([...history, { role: 'assistant', content: '', reasoning: '', reasoningDuration: null }])
+    setInput(''); setBusy(true)
+    const assistantIndex = history.length
+    let reasoningStart = null, contentStart = null, reasoningDone = false
+    try {
+      const response = await fetch('/admin/api/playground/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages: history, stream: params.stream, temperature: params.temperature, top_p: params.topP, frequency_penalty: params.frequencyPenalty, presence_penalty: params.presencePenalty, ...(maxTokensEnabled ? { max_tokens: params.maxTokens } : {}) }),
+      })
+      if (!response.ok) {
+        let detail = `请求失败 (${response.status})`
+        try { detail = (await response.json()).detail || detail } catch { /* ignore */ }
+        throw new Error(detail)
+      }
+      if (!params.stream) {
+        const result = await response.json()
+        const message = result.choices?.[0]?.message || {}
+        setMessages(prev => { const list = [...prev]; if (!list[assistantIndex]) return prev; list[assistantIndex] = { ...list[assistantIndex], content: message.content || '未收到模型回复', reasoning: message.reasoning_content || '' }; return list })
+      } else {
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n'); buffer = lines.pop()
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed.startsWith('data:')) continue
+            const payload = trimmed.slice(5).trim()
+            if (payload === '[DONE]') continue
+            let event
+            try { event = JSON.parse(payload) } catch { continue }
+            const delta = event.choices?.[0]?.delta || {}
+            if (delta.reasoning_content) {
+              if (reasoningStart === null) reasoningStart = Date.now()
+              setMessages(prev => { const list = [...prev]; if (!list[assistantIndex]) return prev; list[assistantIndex] = { ...list[assistantIndex], reasoning: (list[assistantIndex].reasoning || '') + delta.reasoning_content }; return list })
+            }
+            if (delta.content) {
+              if (reasoningStart !== null && contentStart === null) {
+                contentStart = Date.now(); reasoningDone = true
+              }
+              setMessages(prev => { const list = [...prev]; if (!list[assistantIndex]) return prev; list[assistantIndex] = { ...list[assistantIndex], content: (list[assistantIndex].content || '') + delta.content, reasoningDuration: reasoningDone && reasoningStart ? Math.max(1, Math.round((contentStart - reasoningStart) / 1000)) : list[assistantIndex].reasoningDuration }; return list })
+            }
+          }
+        }
+        if (reasoningStart !== null && !reasoningDone) reasoningDone = true
+        setMessages(prev => { const list = [...prev]; if (!list[assistantIndex]) return prev; const current = list[assistantIndex]; list[assistantIndex] = { ...current, reasoningDuration: reasoningStart ? (current.reasoningDuration || Math.max(1, Math.round((Date.now() - reasoningStart) / 1000))) : current.reasoningDuration }; return list })
+      }
+    } catch (e) {
+      notify(e.message, true)
+      setMessages(prev => { const list = [...prev]; if (list[assistantIndex] && !list[assistantIndex].content && !list[assistantIndex].reasoning) list.splice(assistantIndex, 1); return list })
+    } finally { setBusy(false) }
+  }
+
+  const markdown = text => <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{text || ''}</ReactMarkdown>
+
+  return <div className="view-content playground-content"><section className="playground-shell"><div className="playground-messages">{messages.length ? messages.map((message, index) => <div className={`play-message ${message.role}`} key={`${message.role}-${index}`}><span className="play-avatar">{message.role === 'user' ? '你' : 'AI'}</span><div><small>{message.role === 'user' ? '用户' : '模型'}</small>{message.role === 'assistant' && message.reasoning ? <details className="play-reasoning" open><summary><BrainIcon size={14} />{message.reasoningDuration ? `思考了 ${message.reasoningDuration} 秒` : busy && index === messages.length - 1 ? '思考中…' : '思考内容'}</summary><div className="markdown-body reasoning-body">{markdown(message.reasoning)}</div></details> : null}{message.role === 'assistant' && message.content ? <div className="markdown-body">{markdown(message.content)}</div> : message.role === 'assistant' && busy && index === messages.length - 1 ? <p className="typing"><i></i><i></i><i></i></p> : null}</div></div>) : <div className="play-empty"><span><Waypoints size={22} /></span><h3>开始测试模型</h3><p>选择一个官网模型，输入消息查看真实响应。</p></div>}</div><div className="play-composer" ref={composerRef}>{showSettings && <div className="settings-popover"><div className="settings-head"><span className="settings-title"><SlidersHorizontal size={15} />生成参数</span><button className="icon-button" onClick={() => setShowSettings(false)} title="关闭"><X size={15} /></button></div><div className="settings-list"><div className="param-row"><span className="param-label">温度<small>temperature</small></span><input type="range" min="0" max="2" step="0.1" value={params.temperature} onChange={e => updateParam('temperature', Number(e.target.value))} /><span className="param-value">{params.temperature.toFixed(1)}</span></div><div className="param-row"><span className="param-label">Top P<small>top_p</small></span><input type="range" min="0" max="1" step="0.05" value={params.topP} onChange={e => updateParam('topP', Number(e.target.value))} /><span className="param-value">{params.topP.toFixed(2)}</span></div><div className="param-row"><span className="param-label">频率惩罚<small>frequency_penalty</small></span><input type="range" min="-2" max="2" step="0.1" value={params.frequencyPenalty} onChange={e => updateParam('frequencyPenalty', Number(e.target.value))} /><span className="param-value">{params.frequencyPenalty.toFixed(1)}</span></div><div className="param-row"><span className="param-label">存在惩罚<small>presence_penalty</small></span><input type="range" min="-2" max="2" step="0.1" value={params.presencePenalty} onChange={e => updateParam('presencePenalty', Number(e.target.value))} /><span className="param-value">{params.presencePenalty.toFixed(1)}</span></div><div className="param-row"><span className="param-label">最大 Tokens<small>max_tokens</small></span><span className="param-controls"><label className={`play-switch ${maxTokensEnabled ? 'on' : ''}`}><input type="checkbox" checked={maxTokensEnabled} onChange={e => setMaxTokensEnabled(e.target.checked)} /><span className="switch-track"><span className="switch-thumb" /></span></label><input type="number" min="1" step="256" value={params.maxTokens} disabled={!maxTokensEnabled} onChange={e => updateParam('maxTokens', Number(e.target.value))} /></span></div><div className="param-row"><span className="param-label">流式输出<small>stream</small></span><label className={`play-switch ${params.stream ? 'on' : ''}`}><input type="checkbox" checked={params.stream} onChange={e => updateParam('stream', e.target.checked)} /><span className="switch-track"><span className="switch-thumb" /></span></label></div></div></div>}<div className="play-input"><textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} placeholder="输入消息，按 Enter 发送，Shift + Enter 换行" disabled={busy} /><div className="play-input-bar"><div className="play-tools"><button className="icon-button tool-btn" disabled title="上传文件（即将支持）"><Paperclip size={17} /></button><button className={`icon-button tool-btn ${showSettings ? 'active' : ''}`} onClick={() => setShowSettings(v => !v)} title="生成参数" disabled={busy}><SlidersHorizontal size={17} /></button><button className="icon-button tool-btn" onClick={() => setMessages([])} disabled={busy || !messages.length} title="清空对话"><Trash2 size={17} /></button></div><div className="play-right"><div className="model-picker"><button className="model-picker-btn" onClick={() => { setModelOpen(v => !v); setShowSettings(false) }} disabled={busy} title="选择模型"><span className="model-picker-text">{models.find(m => m.id === model)?.name || model || '选择模型'}</span><ChevronDown size={14} className={modelOpen ? 'chev-up' : ''} /></button>{modelOpen && <div className="model-menu">{models.map(item => <button key={item.id} className={`model-option ${item.id === model ? 'active' : ''}`} onClick={() => { setModel(item.id); setModelOpen(false) }}><span>{item.name || item.id}</span><small>{item.id}</small></button>)}</div>}</div><button className="button button-primary" onClick={send} disabled={busy || !input.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={16} />}发送</button></div></div></div></div></section></div>
 }
 
 function App() {
@@ -161,7 +231,7 @@ function App() {
   async function logout() { await request('/logout', { method: 'POST' }).catch(() => {}); setAuthenticated(false) }
   if (authenticated === null) return <div className="boot"><SiOpenapiinitiative /><LoaderCircle className="spin" /></div>
   if (!authenticated) return <Login onLogin={bootstrap} />
-  return <div className="app-shell"><Sidebar view={view} setView={setView} open={sidebar} close={() => setSidebar(false)} logout={logout} /><main className="workspace"><PageHeader view={view} openMenu={() => setSidebar(true)} />{view === 'overview' && <Overview status={status} modelCount={models.length} refresh={refreshAll} loading={loading} />}{view === 'credentials' && <Credentials credentials={credentials} refresh={loadCredentials} statusRefresh={loadStatus} notify={notify} />}{view === 'models' && <Models models={models} refresh={loadModels} loading={loading} />}{view === 'playground' && <Playground models={models} notify={notify} />}</main>{toast && <div className={`toast ${toast.error ? 'toast-error' : ''}`}>{toast.error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{toast.message}</div>}</div>
+  return <div className="app-shell"><Sidebar view={view} setView={setView} open={sidebar} close={() => setSidebar(false)} logout={logout} /><main className="workspace"><button className="floating-menu" onClick={() => setSidebar(true)} title="打开导航"><Menu size={19} /></button>{view === 'overview' && <Overview status={status} modelCount={models.length} refresh={refreshAll} loading={loading} />}{view === 'credentials' && <Credentials credentials={credentials} refresh={loadCredentials} statusRefresh={loadStatus} notify={notify} />}{view === 'models' && <Models models={models} refresh={loadModels} loading={loading} />}{view === 'playground' && <Playground models={models} notify={notify} />}</main>{toast && <div className={`toast ${toast.error ? 'toast-error' : ''}`}>{toast.error ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}{toast.message}</div>}</div>
 }
 
 createRoot(document.getElementById('root')).render(<StrictMode><App /></StrictMode>)

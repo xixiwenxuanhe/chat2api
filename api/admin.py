@@ -1,13 +1,16 @@
 import hashlib
 import hmac
 import time
+import types
 
 from fastapi import Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 import utils.configs as configs
 import utils.globals as globals
 from app import app
+from chatgpt.chatFormat import sanitize_openai_stream
 from chatgpt.credentials import (
     clear_credential_errors,
     delete_credential,
@@ -172,9 +175,13 @@ async def admin_playground_chat(request: Request):
     data = await request.json()
     model = data.get("model")
     messages = data.get("messages")
+    stream = bool(data.get("stream", False))
     if not isinstance(model, str) or not model.strip() or not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=400, detail="model and messages are required")
-    request_data = {"model": model.strip(), "messages": messages, "stream": False}
+    request_data = {"model": model.strip(), "messages": messages, "stream": stream}
+    for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens"):
+        if key in data and data[key] is not None:
+            request_data[key] = data[key]
 
     async def process():
         service = ChatService(configs.authorization_list[0])
@@ -182,8 +189,22 @@ async def admin_playground_chat(request: Request):
             await service.set_dynamic_data(request_data)
             await service.get_chat_requirements()
             await service.prepare_send_conversation()
-            return await service.send_conversation()
-        finally:
+            res = await service.send_conversation()
+            if isinstance(res, types.AsyncGeneratorType):
+                background = BackgroundTask(service.close_client)
+                return StreamingResponse(
+                    sanitize_openai_stream(res),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    background=background,
+                )
             await service.close_client()
+            return res
+        except HTTPException as e:
+            await service.close_client()
+            raise
+        except Exception as e:
+            await service.close_client()
+            raise HTTPException(status_code=500, detail=str(e))
 
     return await async_retry(process)
