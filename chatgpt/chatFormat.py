@@ -17,10 +17,72 @@ from utils.Logger import logger
 moderation_message = "I'm sorry, I cannot provide or engage in any content related to pornography, violence, or any unethical material. If you have any other questions or need assistance, please feel free to let me know. I'll do my best to provide support and assistance."
 
 
+def _extract_non_public_text(value):
+    """Extract readable text from future internal event shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_extract_non_public_text(item) for item in value)
+    if not isinstance(value, dict):
+        return ""
+    if "thoughts" in value and isinstance(value["thoughts"], list):
+        chunks = []
+        for item in value["thoughts"]:
+            if isinstance(item, dict):
+                summary = _extract_non_public_text(item.get("summary"))
+                content = _extract_non_public_text(item.get("content"))
+                chunks.extend(part for part in (summary, content) if part)
+            else:
+                chunks.append(_extract_non_public_text(item))
+        if chunks:
+            return "\n".join(chunks)
+    for key in ("text", "content", "parts", "summary", "message"):
+        text = _extract_non_public_text(value.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _is_public_assistant_message(message):
+    author = message.get("author") or {}
+    content = message.get("content") or {}
+    recipient = message.get("recipient")
+    content_type = content.get("content_type") if isinstance(content, dict) else None
+    return (
+        author.get("role") == "assistant"
+        and recipient in (None, "all")
+        and content_type in ("text", "multimodal_text")
+    )
+
+class _InternalAnnotationFilter:
+    """Remove ChatGPT private-use annotations while preserving SSE boundaries."""
+
+    def __init__(self):
+        self.in_annotation = False
+
+    def feed(self, text):
+        if not isinstance(text, str) or not text:
+            return ""
+        output = []
+        for char in text:
+            if self.in_annotation:
+                if char == "\ue201":
+                    self.in_annotation = False
+                continue
+            if char == "\ue200":
+                self.in_annotation = True
+                continue
+            if char in ("\ue201", "\ue202"):
+                continue
+            output.append(char)
+        return "".join(output)
+
 async def format_not_stream_response(response, prompt_tokens, max_tokens, model):
     chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
     created_time = int(time.time())
     all_text = ""
+    all_reasoning = ""
+    annotation_filter = _InternalAnnotationFilter()
     async for chunk in response:
         try:
             if chunk.startswith("data: [DONE]"):
@@ -29,9 +91,12 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
                 continue
             else:
                 chunk = json.loads(chunk[6:])
-                if not chunk["choices"][0].get("delta"):
+                if not chunk.get("choices") or not chunk["choices"][0].get("delta"):
                     continue
-                all_text += chunk["choices"][0]["delta"]["content"]
+                chunk_delta = chunk["choices"][0]["delta"]
+                delta = annotation_filter.feed(chunk_delta.get("content", ""))
+                all_text += delta
+                all_reasoning += chunk_delta.get("reasoning_content", "") or ""
         except Exception as e:
             logger.error(f"Error: {chunk}, error: {str(e)}")
             continue
@@ -40,6 +105,8 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
         "role": "assistant",
         "content": content,
     }
+    if all_reasoning:
+        message["reasoning_content"] = all_reasoning
     usage = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -66,55 +133,24 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
     return data
 
 
-async def f_stream_response(response, model, max_tokens):
-    chat_id = f"chatcmpl-{''.join(random.choice(string.ascii_letters + string.digits) for _ in range(29))}"
-    created_time = int(time.time())
-    seen = {}
-    ended = False
-    done_emitted = False
-    yield f"data: {json.dumps({'id': chat_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
+async def sanitize_openai_stream(response):
+    """Filter internal annotations from an already formatted OpenAI stream."""
+    annotation_filter = _InternalAnnotationFilter()
     async for raw in response:
         line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-        if line == "data: [DONE]":
-            if not ended:
-                yield "data: [DONE]\n\n"
-                done_emitted = True
-            continue
-        if not line.startswith("data: {") or ended:
+        if not line.startswith("data: {"):
+            yield raw
             continue
         try:
             event = json.loads(line[6:])
+            choices = event.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                if "content" in delta:
+                    delta["content"] = annotation_filter.feed(delta.get("content", ""))
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except (TypeError, ValueError):
-            continue
-        message = event.get("message") or {}
-        role = (message.get("author") or {}).get("role")
-        if role != "assistant":
-            continue
-        content = message.get("content") or {}
-        content_type = content.get("content_type") if isinstance(content, dict) else None
-        if content_type == "reasoning_recap":
-            continue
-        parts = content.get("parts") if isinstance(content, dict) else None
-        current = parts[0] if isinstance(parts, list) and parts and isinstance(parts[0], str) else ""
-        message_id = message.get("id") or "assistant"
-        previous = seen.get(message_id, "")
-        delta = current[len(previous):] if current.startswith(previous) else current
-        seen[message_id] = current
-        if not delta and not message.get("end_turn"):
-            continue
-        finish_reason = "stop" if message.get("end_turn") and delta else None
-        if finish_reason:
-            ended = True
-        chunk = {
-            "id": chat_id,
-            "object": "chat.completion.chunk",
-            "created": created_time,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": finish_reason}],
-        }
-        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    if not done_emitted:
-        yield "data: [DONE]\n\n"
+            yield raw
 
 
 async def wss_stream_response(websocket, conversation_id):
@@ -184,6 +220,44 @@ async def stream_response(service, response, model, max_tokens):
     last_status = None
     model_slug = None
     end = False
+    reasoning_seen = {}
+    last_reasoning_mid = None
+
+    def reasoning_delta(text, message_id=None, fence=None):
+        """Return the reasoning text delta for one stream event.
+
+        text:       extracted raw text
+        message_id: owning message id (dedup repeated / growing events
+                    that belong to the same message)
+        fence:      markdown fence language when this event is code
+                    (None = plain text, '' = plain code block, 'python' ...)
+        """
+        nonlocal last_reasoning_mid
+        if not isinstance(text, str) or not text:
+            return ""
+        key = message_id if message_id else "<no-message-id>"
+        prev = reasoning_seen.get(key)
+        if prev == text:
+            return ""
+        reasoning_seen[key] = text
+        growing = bool(prev) and text.startswith(prev)
+        if fence is not None:
+            # Wrap code / execution output in markdown fences so the
+            # thinking block survives markdown rendering downstream
+            # (e.g. the new-api playground renders reasoning_content
+            # as markdown and would otherwise eat newlines and `*`).
+            last_reasoning_mid = key
+            return f"\n```{fence}\n{text}\n```\n"
+        if growing:
+            # Same message is being appended to: emit the raw suffix so
+            # the text keeps flowing without a spurious line break.
+            last_reasoning_mid = key
+            return text[len(prev):]
+        # A new plain-text chunk: separate it from the previous chunk
+        # (which may be a code block or another summary).
+        sep = "\n" if last_reasoning_mid is not None and last_reasoning_mid != key else ""
+        last_reasoning_mid = key
+        return sep + text
 
     chunk_new_data = {
         "id": chat_id,
@@ -211,9 +285,15 @@ async def stream_response(service, response, model, max_tokens):
             if chunk.startswith("data: {"):
                 chunk_old_data = json.loads(chunk[6:])
                 finish_reason = None
-                message = chunk_old_data.get("message", {})
+                nested = chunk_old_data.get("v") if isinstance(chunk_old_data, dict) else None
+                if isinstance(nested, dict) and isinstance(nested.get("message"), dict):
+                    chunk_old_data = nested
+                raw_message = chunk_old_data.get("message", {})
+                message = raw_message if isinstance(raw_message, dict) else {}
                 conversation_id = chunk_old_data.get("conversation_id")
                 role = message.get('author', {}).get('role')
+                if not isinstance(message.get("author"), dict):
+                    role = None
                 if role == 'user' or role == 'system':
                     continue
 
@@ -225,7 +305,39 @@ async def stream_response(service, response, model, max_tokens):
                 initial_text = meta_data.get("initial_text", "")
                 model_slug = meta_data.get("model_slug", model_slug)
 
-                if not message and chunk_old_data.get("type") == "moderation":
+                outer_content_type = content.get("content_type") if isinstance(content, dict) else None
+                if not isinstance(raw_message, dict):
+                    internal_text = _extract_non_public_text(chunk_old_data)
+                    internal_text = reasoning_delta(internal_text, None, None)
+                    if internal_text:
+                        delta = {"reasoning_content": internal_text}
+                    else:
+                        continue
+                elif (
+                    meta_data.get("is_thinking_preamble_message")
+                    or (
+                        role not in (None, "user", "system")
+                        and not _is_public_assistant_message(message)
+                    )
+                ):
+                    internal_text = _extract_non_public_text(content)
+                    if outer_content_type == "reasoning_recap":
+                        internal_text = ""
+                    fence = None
+                    if outer_content_type == "code":
+                        language = content.get("language") if isinstance(content, dict) else None
+                        # ChatGPT's code interpreter is always Python, but it
+                        # often omits the language field; default to python so
+                        # the code block is labelled correctly downstream.
+                        fence = language if language and language != "unknown" else "python"
+                    elif outer_content_type == "execution_output":
+                        fence = ""
+                    internal_text = reasoning_delta(internal_text, message_id, fence)
+                    if internal_text:
+                        delta = {"reasoning_content": internal_text}
+                    else:
+                        continue
+                elif not message and chunk_old_data.get("type") == "moderation":
                     delta = {"role": "assistant", "content": moderation_message}
                     finish_reason = "stop"
                     end = True
@@ -250,7 +362,13 @@ async def stream_response(service, response, model, max_tokens):
                                 new_text = ""
                         else:
                             if last_message_id and last_message_id != message_id:
-                                continue
+                                # A new content message begins (e.g. the real
+                                # answer after the thinking phase). Its parts[0]
+                                # is the full text of that message: reset the
+                                # incremental pointers and stream it instead of
+                                # dropping the answer.
+                                len_last_content = 0
+                                len_last_citation = 0
                             citation = message.get("metadata", {}).get("citations", [])
                             if len(citation) > len_last_citation:
                                 inside_metadata = citation[-1].get("metadata", {})
@@ -340,8 +458,9 @@ async def stream_response(service, response, model, max_tokens):
                                     image_download_url = await service.get_attachment_url(file_id, conversation_id)
                                     delta = {"content": f"\n![image]({image_download_url})\n"}
                     elif content.get("content_type") == "reasoning_recap":
-                        recap = content.get("content", "")
-                        delta = {"content": f"\n{recap}\n"} if recap else {}
+                        # Keep the model's public answer, not the UI timing
+                        # recap that the ChatGPT stream uses internally.
+                        continue
                     elif message.get("end_turn"):
                         part = content.get("parts", [])[0]
                         new_text = part[len_last_content:]
@@ -373,10 +492,11 @@ async def stream_response(service, response, model, max_tokens):
                             end = True
                 else:
                     continue
-                last_message_id = message_id
-                last_role = role
-                last_status = status
-                if not end and not delta.get("content"):
+                if "reasoning_content" not in delta:
+                    last_message_id = message_id
+                    last_role = role
+                    last_status = status
+                if not end and not delta.get("content") and not delta.get("reasoning_content"):
                     delta = {"role": "assistant", "content": ""}
                 chunk_new_data["choices"][0]["delta"] = delta
                 chunk_new_data["choices"][0]["finish_reason"] = finish_reason
