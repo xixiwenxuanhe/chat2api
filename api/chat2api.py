@@ -15,6 +15,7 @@ from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
 from utils.Logger import logger
 from utils.configs import api_prefix, scheduled_refresh
 from utils.retry import async_retry
+from api.responses import completed as responses_completed, stream as responses_stream, to_chat_request
 
 scheduler = AsyncIOScheduler()
 
@@ -87,6 +88,29 @@ async def send_conversation(request: Request, credentials: HTTPAuthorizationCred
         await chat_service.close_client()
         logger.error(f"Server error, {str(e)}")
         raise HTTPException(status_code=500, detail="Server error")
+
+
+@app.post(f"/{api_prefix}/v1/responses" if api_prefix else "/v1/responses")
+async def send_response(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail={"error": "JSON body must be an object"})
+    request_data = to_chat_request(body)
+    if not request_data["messages"]:
+        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+    service, result = await async_retry(process, request_data, credentials.credentials)
+    model = request_data["model"]
+    if isinstance(result, types.AsyncGeneratorType):
+        return StreamingResponse(responses_stream(result, model), media_type="text/event-stream",
+                                 background=BackgroundTask(service.close_client))
+    try:
+        payload = responses_completed(result, model)
+    finally:
+        await service.close_client()
+    return JSONResponse(payload, media_type="application/json")
 
 
 @app.get(f"/{api_prefix}/v1/models" if api_prefix else "/v1/models")

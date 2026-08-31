@@ -21,6 +21,7 @@ from chatgpt.credentials import (
 from chatgpt.ChatService import ChatService
 from utils.retry import async_retry
 from chatgpt.modelCatalog import get_model_catalog, to_openai_model_list
+from api.responses import completed as responses_completed, stream as responses_stream, to_chat_request
 
 
 COOKIE_NAME = "chat2api_admin"
@@ -176,9 +177,14 @@ async def admin_playground_chat(request: Request):
     model = data.get("model")
     messages = data.get("messages")
     stream = bool(data.get("stream", False))
+    protocol = str(data.get("protocol") or "chat.completions").strip().lower()
+    if protocol not in {"chat.completions", "responses"}:
+        raise HTTPException(status_code=400, detail="unsupported protocol")
     if not isinstance(model, str) or not model.strip() or not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=400, detail="model and messages are required")
     request_data = {"model": model.strip(), "messages": messages, "stream": stream}
+    if protocol == "responses":
+        request_data = to_chat_request({"model": model.strip(), "input": messages, "stream": stream})
     for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens"):
         if key in data and data[key] is not None:
             request_data[key] = data[key]
@@ -193,13 +199,13 @@ async def admin_playground_chat(request: Request):
             if isinstance(res, types.AsyncGeneratorType):
                 background = BackgroundTask(service.close_client)
                 return StreamingResponse(
-                    sanitize_openai_stream(res),
+                    responses_stream(res, model) if protocol == "responses" else sanitize_openai_stream(res),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                     background=background,
                 )
             await service.close_client()
-            return res
+            return responses_completed(res, model) if protocol == "responses" else res
         except HTTPException as e:
             await service.close_client()
             raise

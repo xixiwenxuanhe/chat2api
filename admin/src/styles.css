@@ -61,3 +61,4 @@
 .param-row:last-child .play-switch{margin-left:auto}
 .user-body{color:#30363c}
 .user-body p{margin:4px 0 8px}
+.protocol-select{margin-left:auto;height:30px;min-width:150px;border:1px solid #dde1e5;border-radius:7px;background:#fbfcfc;padding:0 8px;font-size:12px;color:#30343a;outline:0}.protocol-select:focus{border-color:var(--green);box-shadow:0 0 0 3px rgba(16,163,127,.1)}

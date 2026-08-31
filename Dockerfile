@@ -1,4 +1,4 @@
-FROM node:22-alpine AS admin-build
+FROM node:22 AS admin-build
 
 WORKDIR /build
 
